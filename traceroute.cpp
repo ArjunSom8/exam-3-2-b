@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <netdb.h>
+#include <sys/time.h>
+#include <sys/select.h>
 
 /* IP Header */
 struct ipheader {
@@ -65,6 +67,7 @@ void traceroute(char* dest) {
     printf("traceroute to %s (%s), %d hops max, %ld bytes packets\n", dest, inet_ntoa(addr.sin_addr), MAX_HOPS, sizeof(ipheader) + sizeof(icmpheader));
     
     char send_buf[PACKET_LEN], recv_buf[PACKET_LEN];
+
     /** TODO: 1
      * Prepare packet
      * a. outgoing packets only contain the icmpheader with type = ICMP_ECHO_REQUEST, code = 0
@@ -76,15 +79,23 @@ void traceroute(char* dest) {
      * - icmpheader* icmp = (icmpheader*)send_buf;
      * - set header fields with required values: icmp->field = value;
      * */
+    icmpheader* icmp = (icmpheader*)send_buf;
+    icmp->icmp_type = ICMP_ECHO_REQUEST;
+    icmp->icmp_code = 0;
+    icmp->icmp_chksum = 0;
+    icmp->icmp_id = getpid();
+
     
     for (int ttl = 1; ttl <= MAX_HOPS; ) {
         printf("%2d ", ttl);
+        
         /** TODO: 2
          * set the seq in icmpheader to ttl
          * 
          * HINT:
          * similar to TODO 1 HINT, just set the seq
          */
+        icmp->icmp_seq = ttl;
        
 
         // set ttl to outgoing packets: no need to change
@@ -95,6 +106,7 @@ void traceroute(char* dest) {
 
         int retry = 0;
         while (1) {
+
             /** TODO: 3
              * send packet using sendto(...)
              * 
@@ -103,7 +115,20 @@ void traceroute(char* dest) {
              * - ensure we send one icmpheader in the packet
              * 
              */
-           
+            struct sockaddr_in dest_addr;
+            dest_addr.sin_family = AF_INET;
+            dest_addr.sin_addr = addr.sin_addr;
+
+            int packetLength = sizeof(icmpheader);
+
+            if (sendto(sockfd, send_buf, packetLength, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) <= 0)
+            {
+                perror("Failed");
+                exit(-1);
+            }
+
+            struct timeval tv;
+            fd_set rfd;
            
             // wait to check if there is data available to receive; need to retry if timeout: no need to change
             tv.tv_sec = 1;
@@ -117,15 +142,39 @@ void traceroute(char* dest) {
              * a. if ret == 0: timeout --> retry upto MAX_RETRY
              * b. if ret > 0: data available, use recvfrom(...) to read data to recv_buf and process --> see TODO 5 below
              */
-            if (ret == 0) {
+
+
+            if (ret == 0) 
+            {
                 // TODO 4.a
+                retry++;
+
+                if (retry > MAX_RETRY)
+                {
+                    printf("* ");
+                    retry = 0;
+                    break;
+                }
+                else
+                {
+                    continue;
+                }
             }
-            else if (ret > 0) {
+            else if (ret > 0) 
+            {
                 // TODO 4.b
                 /** HINT: 
                  * a. check man page of recvfrom, function returns bytes received
                  * b. ensure data is received in recv_buf
                  */
+                struct sockaddr_in sender_addr;
+                socklen_t sender_addr_len = sizeof(sender_addr);
+
+                int bytesReceived = recvfrom(sockfd, recv_buf, sizeof(recv_buf), 0, (struct sockaddr*)&sender_addr, &sender_addr_len);
+                if (bytesReceived <= 0)
+                {   
+                    perror("Failed");
+                }
                 
                 /** TODO: 5
                  * handle received packets based on received bytes
@@ -144,6 +193,25 @@ void traceroute(char* dest) {
                  * c. otherwise ignore packet
                  * 
                  */
+                ipheader* recv_iphdr = (ipheader*)recv_buf;
+                icmpheader* recv_icmphdr = (icmpheader*)(recv_buf + sizeof(ipheader));
+
+                if ((recv_icmphdr->icmp_type == ICMP_TIME_EXCEEDED) && (recv_icmphdr->icmp_seq == ttl))
+                {
+                    printf("%s", inet_ntoa(recv_iphdr->iph_sourceip));
+                    ttl++;
+                    break;
+                }
+                else if ((recv_icmphdr->icmp_type == ICMP_ECHO_REPLY) && (recv_icmphdr->icmp_seq == ttl))
+                {
+                     printf("%s ", inet_ntoa(recv_iphdr->iph_sourceip));
+                     exit(0);
+                }
+                else
+                {
+                    continue;
+                }
+                
                
                 // ----------------
             }
@@ -156,6 +224,12 @@ void traceroute(char* dest) {
             /** TODO: 6
              * Check if timed out for MAX_RETRY times; increment ttl to move on to processing next hop
              */
+            if (retry >= MAX_RETRY)
+            {
+                printf("* ");
+                ttl++;
+                break;
+            }
         }
     }
     close(sockfd);
